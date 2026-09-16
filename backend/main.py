@@ -1742,7 +1742,7 @@ def transcribe_audio_with_gemini(audio_bytes: bytes, mime_type: str = "audio/web
                 "- Do NOT hallucinate, fabricate, or invent a generic elevator pitch or work history if not spoken in the audio.\n"
                 "- If no intelligible human speech is spoken (e.g. only silence, hum, breathing, static, tone, or background noise), output strictly: [NO_SPEECH]"
             )
-            for model_name in ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite"]:
+            for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
                 try:
                     res = client.models.generate_content(
                         model=model_name,
