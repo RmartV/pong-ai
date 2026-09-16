@@ -2,7 +2,11 @@ import { useState, useRef, useEffect } from "react";
 import "./App.css";
 
 // Base URL for all API calls: points to the FastAPI backend or Vercel environment variable
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API = import.meta.env.VITE_API_URL !== undefined 
+  ? import.meta.env.VITE_API_URL 
+  : (typeof window !== "undefined" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1" 
+      ? "" 
+      : "http://localhost:8000");
 
 // ── Icons (inline SVG - zero emojis) ──────────────────────────────────────────
 const UploadIcon = () => (
