@@ -2319,7 +2319,12 @@ async def submit_blueprint_pitch(request: Request):
     upsert_candidate(player_card)
 
     # Dispatch to Workato webhook
-    webhook_url = get_env("WORKATO_BLUEPRINT_WEBHOOK_URL") or get_env("WORKATO_APPROVAL_WEBHOOK_URL")
+    webhook_url = (
+        get_env("WORKATO_BLUEPRINT_WEBHOOK_URL")
+        or get_env("WORKATO_APPROVAL_WEBHOOK_URL")
+        or get_env("WORKATO_WEBHOOK_URL")
+        or "https://webhooks.trial.workato.com/webhooks/rest/3bab9a2f-bb30-454b-9639-3354ff497494/candidate---slack-manager-approval"
+    )
     dispatch_status = "unconfigured"
     dispatch_msg = "No Workato Blueprint Webhook URL configured"
     status_code = None
@@ -2363,9 +2368,12 @@ def test_dispatch_to_blueprint_webhook():
     Fires an active candidate pitch directly to the Workato Blueprint webhook
     so Workato can capture the schema without requiring manual sample JSON pasting.
     """
-    webhook_url = get_env("WORKATO_BLUEPRINT_WEBHOOK_URL") or get_env("WORKATO_APPROVAL_WEBHOOK_URL")
-    if not webhook_url:
-        raise HTTPException(status_code=400, detail="WORKATO_BLUEPRINT_WEBHOOK_URL is not configured in .env")
+    webhook_url = (
+        get_env("WORKATO_BLUEPRINT_WEBHOOK_URL")
+        or get_env("WORKATO_APPROVAL_WEBHOOK_URL")
+        or get_env("WORKATO_WEBHOOK_URL")
+        or "https://webhooks.trial.workato.com/webhooks/rest/3bab9a2f-bb30-454b-9639-3354ff497494/candidate---slack-manager-approval"
+    )
 
     candidates = get_all_candidates()
     cand = candidates[0] if candidates else {
