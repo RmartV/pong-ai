@@ -1814,14 +1814,20 @@ def extract_candidate_from_resume(resume_text: str, pitch_transcript: str = "") 
     
     lines = [l.strip() for l in resume_text.split("\n") if l.strip() and not l.strip().startswith("#")]
     
-    # Smarter fallback name: avoid "Intern Resume", "Resume", "CV"
+    # Smarter fallback name: avoid "Intern Resume", "Resume", "CV", "PAGE", "PAGE 1"
     fallback_name = "Candidate Applicant"
-    for line in lines[:5]:
+    bad_name_words = ["resume", "resumé", "curriculum", "vitae", "profile", "intern", "applicant", "contact", "page", "p a g e", "education", "skills", "experience", "summary", "phone", "email"]
+    for line in lines[:8]:
         clean_l = re.sub(r"[^a-zA-Z\s]", "", line).strip()
         lower_l = clean_l.lower()
-        if any(bad in lower_l for bad in ["resume", "resumé", "curriculum", "vitae", "profile", "intern", "applicant", "contact"]):
+        compressed = lower_l.replace(" ", "")
+        if any(bad in lower_l for bad in bad_name_words) or compressed in ["page", "pageone", "pagetwo", "internresume", "myresume"]:
             continue
-        if 2 <= len(clean_l.split()) <= 4 and len(clean_l) < 35:
+        # Also check for single-letter spaced words like "P A G E"
+        words = clean_l.split()
+        if all(len(w) == 1 for w in words):
+            continue
+        if 2 <= len(words) <= 4 and len(clean_l) < 40:
             fallback_name = clean_l.title()
             break
     if fallback_name == "Candidate Applicant" and detected_email:
@@ -1829,22 +1835,46 @@ def extract_candidate_from_resume(resume_text: str, pitch_transcript: str = "") 
         if not re.search(r"\d", prefix):
             fallback_name = prefix.title()
 
-    # Domain skill keyword scanning fallback
+    # Dynamic skill extraction: Check for explicit "Skills:" or "Technical Skills:" section
+    extracted_section_skills = []
+    skills_match = re.search(r"(?:skills|technical skills|core competencies|technologies|tools)[\s:]+([^\n]+(?:\n[^\n]+){0,3})", resume_text, re.IGNORECASE)
+    if skills_match:
+        raw_skills_block = skills_match.group(1)
+        # Split by comma, bullet, pipe, or semicolon
+        items = re.split(r"[,•|\n;•\-]+", raw_skills_block)
+        for item in items:
+            cleaned = item.strip()
+            if 2 <= len(cleaned) <= 30 and not any(bad in cleaned.lower() for bad in ["experience", "education", "summary", "project", "page"]):
+                extracted_section_skills.append(cleaned.title())
+
+    # Comprehensive domain skill keyword scanning fallback (60+ skills across all domains)
     known_skills = [
         "FastAPI", "Python", "REST API", "Microservices", "Docker", "Kubernetes", "PostgreSQL",
-        "AWS", "Cloud Architecture", "CI/CD", "Redis", "Kafka", "React", "TypeScript", "Node.js",
-        "Cypress", "Selenium", "Test Automation", "Performance Testing", "QA Compliance",
-        "Event Management", "Venue Operations", "Logistics", "Budget Management", "Vendor Coordination"
+        "AWS", "Cloud Architecture", "CI/CD", "Redis", "Kafka", "React", "TypeScript", "JavaScript",
+        "Node.js", "HTML", "CSS", "SQL", "MongoDB", "Git", "GitHub", "Linux", "Playwright",
+        "Cypress", "Selenium", "Test Automation", "Performance Testing", "QA Compliance", "End-to-End Testing",
+        "API Testing", "Unit Testing", "Integration Testing", "Defect Tracking", "Jira", "Agile", "Scrum",
+        "Event Management", "Venue Operations", "Logistics", "Budget Management", "Vendor Coordination",
+        "Guest Experience", "Hospitality", "Stage Production", "Conference Planning", "Audio Visual",
+        "Digital Marketing", "SEO", "Content Strategy", "Brand Strategy", "Google Analytics",
+        "Financial Modeling", "Accounting", "Variance Analysis", "Auditing", "Risk Management"
     ]
     detected_skills = [sk for sk in known_skills if re.search(r"\b" + re.escape(sk) + r"\b", resume_text, re.IGNORECASE)]
-    if not detected_skills:
-        detected_skills = ["Software Engineering", "Systems Architecture", "Technical Execution"]
+    
+    # Merge detected skills with section skills (preserve uniqueness and all skills)
+    combined_skills = []
+    for s in (extracted_section_skills + detected_skills):
+        if s not in combined_skills:
+            combined_skills.append(s)
+
+    if not combined_skills:
+        combined_skills = ["Software Engineering", "Systems Architecture", "Technical Execution"]
 
     detected_role = "Professional Candidate"
     r_lower = resume_text.lower()
     if any(k in r_lower for k in ["event", "venue", "hospitality", "logistics"]):
         detected_role = "Event Operations & Logistics Specialist"
-    elif any(k in r_lower for k in ["qa", "test", "cypress", "selenium", "compliance"]):
+    elif any(k in r_lower for k in ["qa", "test", "cypress", "selenium", "compliance", "playwright"]):
         detected_role = "QA & Systems Test Engineer"
     elif any(k in r_lower for k in ["api", "backend", "fastapi", "microservice", "distributed"]):
         detected_role = "Lead API & Backend Architect"
@@ -1853,7 +1883,7 @@ def extract_candidate_from_resume(resume_text: str, pitch_transcript: str = "") 
         "name": fallback_name,
         "email": detected_email,
         "target_role": detected_role,
-        "skills": detected_skills[:6],
+        "skills": combined_skills,
         "experience_level": "Senior"
     }
 
@@ -1861,10 +1891,10 @@ def extract_candidate_from_resume(resume_text: str, pitch_transcript: str = "") 
         prompt = f"""Extract the candidate contact details, target professional role, and core skills from this resume and elevator pitch across any domain (Event, QA/Testing, IT, Marketing, Operations, etc.).
 Output ONLY a valid JSON object matching this schema:
 {{
-  "name": "Full Candidate Name (from header or top)",
+  "name": "Actual person full name (e.g. Alex Martinez, NOT 'PAGE', 'RESUME', or document headers)",
   "email": "Candidate Email Address",
   "target_role": "Target or current professional title across any field",
-  "skills": ["Skill 1", "Skill 2", "Skill 3", "Skill 4", "Skill 5"],
+  "skills": ["Skill 1", "Skill 2", "Skill 3", "Skill 4", "Skill 5", "...extract ALL skills found in the resume"],
   "experience_level": "Senior / Mid-Level / Junior / Lead"
 }}
 
@@ -1886,13 +1916,16 @@ PITCH:
                 raw = re.sub(r"^```(?:json)?", "", raw).strip()
                 raw = re.sub(r"```$", "", raw).strip()
                 parsed = json.loads(raw)
-                if parsed.get("name") and not any(bad in parsed["name"].lower() for bad in ["resume", "resumé", "curriculum"]):
-                    candidate_data["name"] = parsed["name"].strip()
+                p_name = (parsed.get("name") or "").strip()
+                p_name_lower = p_name.lower()
+                p_compressed = p_name_lower.replace(" ", "")
+                if p_name and not any(bad in p_name_lower for bad in bad_name_words) and p_compressed not in ["page", "pageone", "pagetwo"]:
+                    candidate_data["name"] = p_name
                 if parsed.get("email"):
                     candidate_data["email"] = parsed["email"].strip()
                 if parsed.get("target_role"):
                     candidate_data["target_role"] = parsed["target_role"].strip()
-                if parsed.get("skills"):
+                if parsed.get("skills") and isinstance(parsed["skills"], list) and len(parsed["skills"]) > 0:
                     candidate_data["skills"] = parsed["skills"]
                 if parsed.get("experience_level"):
                     candidate_data["experience_level"] = parsed["experience_level"].strip()
