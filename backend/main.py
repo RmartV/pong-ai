@@ -1818,10 +1818,12 @@ def extract_candidate_from_resume(resume_text: str, pitch_transcript: str = "") 
     fallback_name = "Candidate Applicant"
     bad_name_words = ["resume", "resumé", "curriculum", "vitae", "profile", "intern", "applicant", "contact", "page", "p a g e", "education", "skills", "experience", "summary", "phone", "email"]
     for line in lines[:8]:
-        clean_l = re.sub(r"[^a-zA-Z\s]", "", line).strip()
+        # Strip leading label like "Name: ", "Full Name: "
+        stripped_line = re.sub(r"^(?:name|full name|candidate name|applicant name|candidate|applicant)\s*[:\-]?\s*", "", line, flags=re.IGNORECASE).strip()
+        clean_l = re.sub(r"[^a-zA-Z\s]", "", stripped_line).strip()
         lower_l = clean_l.lower()
         compressed = lower_l.replace(" ", "")
-        if any(bad in lower_l for bad in bad_name_words) or compressed in ["page", "pageone", "pagetwo", "internresume", "myresume"]:
+        if any(bad in lower_l for bad in bad_name_words) or compressed in ["page", "pageone", "pagetwo", "internresume", "myresume", "name"]:
             continue
         # Also check for single-letter spaced words like "P A G E"
         words = clean_l.split()
@@ -1836,6 +1838,14 @@ def extract_candidate_from_resume(resume_text: str, pitch_transcript: str = "") 
             fallback_name = prefix.title()
 
     # Dynamic skill extraction: Check for explicit "Skills:" or "Technical Skills:" section
+    invalid_skill_words = {
+        "june", "july", "august", "september", "october", "november", "december",
+        "january", "february", "march", "april", "may", "present", "current",
+        "work", "related", "courses", "course", "experience", "education",
+        "summary", "project", "projects", "page", "university", "college",
+        "school", "high school", "date", "dates", "duration", "year", "years",
+        "month", "months", "from", "to", "gpa", "degree", "bachelor", "master"
+    }
     extracted_section_skills = []
     skills_match = re.search(r"(?:skills|technical skills|core competencies|technologies|tools)[\s:]+([^\n]+(?:\n[^\n]+){0,3})", resume_text, re.IGNORECASE)
     if skills_match:
@@ -1844,7 +1854,10 @@ def extract_candidate_from_resume(resume_text: str, pitch_transcript: str = "") 
         items = re.split(r"[,•|\n;•\-]+", raw_skills_block)
         for item in items:
             cleaned = item.strip()
-            if 2 <= len(cleaned) <= 30 and not any(bad in cleaned.lower() for bad in ["experience", "education", "summary", "project", "page"]):
+            # Must not contain digits (dates/years like 2023) or date/education stopwords
+            if (2 <= len(cleaned) <= 30 and 
+                not re.search(r"\d", cleaned) and 
+                not any(w in cleaned.lower().split() for w in invalid_skill_words)):
                 extracted_section_skills.append(cleaned.title())
 
     # Comprehensive domain skill keyword scanning fallback (60+ skills across all domains)
@@ -1861,11 +1874,15 @@ def extract_candidate_from_resume(resume_text: str, pitch_transcript: str = "") 
     ]
     detected_skills = [sk for sk in known_skills if re.search(r"\b" + re.escape(sk) + r"\b", resume_text, re.IGNORECASE)]
     
-    # Merge detected skills with section skills (preserve uniqueness and all skills)
+    # Merge detected skills with section skills (preserve uniqueness and valid skills)
     combined_skills = []
     for s in (extracted_section_skills + detected_skills):
-        if s not in combined_skills:
-            combined_skills.append(s)
+        s_clean = s.strip()
+        if (s_clean and 
+            s_clean not in combined_skills and 
+            not re.search(r"\d", s_clean) and 
+            not any(w in s_clean.lower().split() for w in invalid_skill_words)):
+            combined_skills.append(s_clean)
 
     if not combined_skills:
         combined_skills = ["Software Engineering", "Systems Architecture", "Technical Execution"]
