@@ -1976,7 +1976,7 @@ export default function App() {
                         <div className="extracted-row"><span>Role:</span> <strong>{pitchResult.extracted_from_resume.target_role}</strong></div>
                         {pitchResult.extracted_from_resume.skills && (
                           <div className="extracted-row">
-                            <span>Skills:</span> <strong>{Array.isArray(pitchResult.extracted_from_resume.skills) ? pitchResult.extracted_from_resume.skills.slice(0, 6).join(", ") : pitchResult.extracted_from_resume.skills}</strong>
+                            <span>Skills:</span> <strong>{Array.isArray(pitchResult.extracted_from_resume.skills) ? pitchResult.extracted_from_resume.skills.join(", ") : pitchResult.extracted_from_resume.skills}</strong>
                           </div>
                         )}
                       </div>
