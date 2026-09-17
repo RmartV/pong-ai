@@ -1049,10 +1049,6 @@ export default function App() {
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
     }
-    if (audioContextRef.current) {
-      try { audioContextRef.current.close(); } catch (e) {}
-      audioContextRef.current = null;
-    }
     setAudioLevel(0);
 
     if (recognitionRef.current) {
@@ -1067,11 +1063,12 @@ export default function App() {
       setIsTranscribing(true);
       setTranscriptionStatus("Gemini AI: Processing audio and transcribing word-for-word...");
 
-      try {
-        mediaRecorderRef.current.requestData();
-      } catch (e) {}
-
       mediaRecorderRef.current.onstop = async () => {
+        if (audioContextRef.current) {
+          try { audioContextRef.current.close(); } catch (e) {}
+          audioContextRef.current = null;
+        }
+
         const mimeType = mediaRecorderRef.current?.mimeType || "audio/webm";
         const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
         setRecordedAudioBlob(audioBlob);
@@ -1085,6 +1082,8 @@ export default function App() {
           videoRef.current.srcObject = null;
         }
 
+        const liveSpeech = (finalTranscriptRef.current || "").trim();
+
         if (audioBlob.size > 200) {
           try {
             const formData = new FormData();
@@ -1095,32 +1094,35 @@ export default function App() {
             });
             const data = await res.json();
             if (data.status === "success" && data.transcript && data.transcript.trim()) {
-              setSpokenPitch(data.transcript.trim());
-              setTranscriptionStatus(`Verbatim Transcription Verified by Gemini AI (${data.word_count || data.transcript.split(/\s+/).length} words captured)`);
+              const text = data.transcript.trim();
+              setSpokenPitch(text);
+              finalTranscriptRef.current = text;
+              setTranscriptionStatus(`Verbatim Transcription Verified by Gemini AI (${data.word_count || text.split(/\s+/).length} words captured)`);
+            } else if (liveSpeech) {
+              setSpokenPitch(liveSpeech);
+              setTranscriptionStatus(`Voice Captured via Live Speech Engine (${liveSpeech.split(/\s+/).length} words)`);
             } else if (data.status === "no_speech") {
-              if (spokenPitch && spokenPitch.trim()) {
-                setTranscriptionStatus(`Voice Captured via Live Preview (${spokenPitch.trim().split(/\s+/).length} words)`);
-              } else {
-                setTranscriptionStatus("No human speech was detected in audio. Please speak clearly into your mic.");
-              }
+              setTranscriptionStatus("No human speech was detected in audio. Please speak clearly into your mic or type pitch below.");
             } else {
-              if (spokenPitch && spokenPitch.trim()) {
-                setTranscriptionStatus(`Voice Pitch Captured (${spokenPitch.trim().split(/\s+/).length} words)`);
-              } else {
-                setTranscriptionStatus("Audio transcription complete.");
-              }
+              setTranscriptionStatus(data.detail ? `Transcription note: ${data.detail}` : "Audio transcription complete.");
             }
           } catch (err) {
             console.warn("Gemini audio transcription notice:", err);
-            if (!spokenPitch) {
-              setTranscriptionStatus("Server transcription note. Speak clearly and verify your pitch.");
+            if (liveSpeech) {
+              setSpokenPitch(liveSpeech);
+              setTranscriptionStatus(`Voice Captured via Live Speech Engine (${liveSpeech.split(/\s+/).length} words)`);
+            } else {
+              setTranscriptionStatus("Server transcription note. Speak clearly and verify your pitch, or type pitch below.");
             }
           } finally {
             setIsTranscribing(false);
           }
         } else {
           setIsTranscribing(false);
-          if (!spokenPitch) {
+          if (liveSpeech) {
+            setSpokenPitch(liveSpeech);
+            setTranscriptionStatus(`Voice Captured via Live Speech Engine (${liveSpeech.split(/\s+/).length} words)`);
+          } else {
             setTranscriptionStatus("Audio sample was too short. Speak into your microphone and click Stop when done.");
           }
         }
@@ -1132,6 +1134,10 @@ export default function App() {
         setIsTranscribing(false);
       }
     } else {
+      if (audioContextRef.current) {
+        try { audioContextRef.current.close(); } catch (e) {}
+        audioContextRef.current = null;
+      }
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
@@ -1920,13 +1926,16 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Read-Only Transcript Area */}
+                  {/* Transcript Area */}
                   <textarea
                     rows={6}
-                    readOnly={true}
                     className="blueprint-transcript-preview"
-                    placeholder="Your spoken pitch will be transcribed here in real-time as you speak. This area is strictly a preview and cannot be manually typed into."
+                    placeholder="Your spoken pitch will be transcribed here automatically as you speak. You can also edit or type your pitch directly here."
                     value={spokenPitch}
+                    onChange={(e) => {
+                      setSpokenPitch(e.target.value);
+                      finalTranscriptRef.current = e.target.value;
+                    }}
                   />
 
                   <div className="transcript-footer-meta">

@@ -1716,52 +1716,66 @@ try:
 except ImportError:
     workato_service = None
 
-def transcribe_audio_with_gemini(audio_bytes: bytes, mime_type: str = "audio/webm") -> str:
+def transcribe_audio_with_gemini(audio_bytes: bytes, mime_type: str = "audio/webm") -> tuple:
     """
     Transcribes audio accurately and verbatim using Gemini native multimodal audio capabilities.
     Supports audio/webm, audio/wav, audio/mp3, audio/ogg, audio/mp4.
+    Returns (transcript_string, debug_message).
     """
+    global client
+    if client is None:
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
+        if genai is not None and api_key:
+            try:
+                client = genai.Client(api_key=api_key)
+            except Exception as e:
+                return "", f"Failed to initialize Gemini client: {e}"
+        else:
+            return "", f"Gemini client not initialized (genai_present={genai is not None}, has_api_key={bool(api_key)})"
+
     if not audio_bytes or len(audio_bytes) < 100:
-        return ""
+        return "", "Audio sample was too short or empty."
 
     clean_mime = mime_type.split(";")[0].strip() if mime_type else "audio/webm"
     if clean_mime not in ["audio/webm", "audio/wav", "audio/mp3", "audio/ogg", "audio/aac", "audio/m4a", "audio/mp4", "audio/mpeg"]:
         clean_mime = "audio/webm"
 
-    if client is not None:
-        try:
-            from google.genai import types
-            part = types.Part.from_bytes(data=audio_bytes, mime_type=clean_mime)
-            prompt = (
-                "You are an exact, verbatim speech-to-text audio transcriber.\n"
-                "Listen to the human speaker in this audio file and transcribe EXACTLY what they say word-for-word.\n"
-                "Strict rules:\n"
-                "- Transcribe faithfully and accurately, preserving technical terms, engineering tools, APIs, frameworks, and metrics.\n"
-                "- Output ONLY the exact plain transcription text with natural capitalization and punctuation.\n"
-                "- Do NOT add any preamble, conversational commentary, introductory text, or markdown code blocks.\n"
-                "- Do NOT hallucinate, fabricate, or invent a generic elevator pitch or work history if not spoken in the audio.\n"
-                "- If no intelligible human speech is spoken (e.g. only silence, hum, breathing, static, tone, or background noise), output strictly: [NO_SPEECH]"
-            )
-            for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
-                try:
-                    res = client.models.generate_content(
-                        model=model_name,
-                        contents=[part, prompt],
-                        config=types.GenerateContentConfig(
-                            temperature=0.0
-                        )
+    err_list = []
+    try:
+        from google.genai import types
+        part = types.Part.from_bytes(data=audio_bytes, mime_type=clean_mime)
+        prompt = (
+            "You are an exact speech-to-text audio transcriber.\n"
+            "Listen carefully to the audio file and transcribe the candidate's spoken words word-for-word.\n"
+            "Strict rules:\n"
+            "- Transcribe spoken words faithfully, preserving technical terms, frameworks, and metrics.\n"
+            "- If the speech has slight background noise or lower volume, do your best to capture what the speaker is saying.\n"
+            "- Output ONLY the plain transcription text with natural punctuation.\n"
+            "- Do NOT add any introductory text, markdown quotes, or conversational notes.\n"
+            "- Only if there is zero human speech (pure silence, static, or hum), output strictly: [NO_SPEECH]"
+        )
+        for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+            try:
+                res = client.models.generate_content(
+                    model=model_name,
+                    contents=[part, prompt],
+                    config=types.GenerateContentConfig(
+                        temperature=0.0
                     )
-                    transcript = (res.text or "").strip()
-                    if transcript and "[no_speech]" not in transcript.lower() and transcript.lower() not in ("[silence]", "no speech detected.", "silence", "no audio detected."):
-                        return transcript
-                    elif "[no_speech]" in transcript.lower():
-                        return ""
-                except Exception as e:
-                    print(f"[WARN] Gemini audio transcription on {model_name} failed: {e}")
-        except Exception as e:
-            print(f"[WARN] Failed to prepare audio for Gemini: {e}")
+                )
+                transcript = (res.text or "").strip()
+                if transcript and "[no_speech]" not in transcript.lower() and transcript.lower() not in ("[silence]", "no speech detected.", "silence", "no audio detected."):
+                    return transcript, f"Transcribed via {model_name}"
+                elif "[no_speech]" in transcript.lower():
+                    return "", "Model detected silence / no speech"
+            except Exception as e:
+                err_list.append(f"{model_name}: {e}")
+                print(f"[WARN] Gemini audio transcription on {model_name} failed: {e}")
+    except Exception as e:
+        err_list.append(f"Audio prep error: {e}")
+        print(f"[WARN] Failed to prepare audio for Gemini: {e}")
 
-    return ""
+    return "", "; ".join(err_list) if err_list else "No transcript produced"
 
 
 @app.post("/api/blueprint/transcribe")
@@ -1791,15 +1805,18 @@ async def transcribe_pitch_audio(request: Request):
             "message": "Audio stream was too brief or empty."
         }
 
-    transcript = transcribe_audio_with_gemini(audio_bytes, mime_type)
+    transcript, detail = transcribe_audio_with_gemini(audio_bytes, mime_type)
     word_count = len(transcript.split()) if transcript else 0
 
+    status = "success" if transcript else ("no_speech" if "no speech" in detail.lower() else "api_error")
+
     return {
-        "status": "success" if transcript else "no_speech",
+        "status": status,
         "transcript": transcript,
         "word_count": word_count,
         "byte_count": len(audio_bytes),
-        "mime_type": mime_type
+        "mime_type": mime_type,
+        "detail": detail
     }
 
 
