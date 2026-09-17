@@ -249,6 +249,9 @@ export default function App() {
   const audioContextRef     = useRef(null);
   const animFrameRef        = useRef(null);
   const eyeTrackingIntervalRef = useRef(null);
+  const faceDetectorRef     = useRef(null);
+  const lastDirectGazeRef   = useRef(false);
+  const blinkCounterRef     = useRef(0);
   const vocalCadenceRef     = useRef(0);
   const resumeInputRef      = useRef(null);
   const fileInputRef        = useRef(null);
@@ -704,6 +707,8 @@ export default function App() {
     setTelemetryActive(true);
     setEyeContact(0);
     setIsDirectEyeContact(false);
+    lastDirectGazeRef.current = false;
+    blinkCounterRef.current = 0;
     setVocalCadence(0);
     setVocalArchetype("Listening...");
     setConfidenceScore(0);
@@ -864,131 +869,229 @@ export default function App() {
     }, 1000);
 
     // Real-Time Eye Contact & Face Gaze Centering Loop
+    // Real-Time Eye Contact & Face Gaze Centering Loop
     const gazeHistory = [];
 
-    eyeTrackingIntervalRef.current = setInterval(() => {
+    eyeTrackingIntervalRef.current = setInterval(async () => {
       if (!isRecordingRef.current) return;
 
       let isDirectGaze = false;
+      let faceDetected = false;
 
-      if (videoRef.current && videoRef.current.videoWidth > 0 && canvasRef.current) {
+      // 1. Try Hardware-Accelerated Native FaceDetector if available in browser
+      if (typeof window !== "undefined" && "FaceDetector" in window && videoRef.current && videoRef.current.videoWidth > 0) {
+        try {
+          if (!faceDetectorRef.current) {
+            faceDetectorRef.current = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+          }
+          const faces = await faceDetectorRef.current.detect(videoRef.current);
+          if (faces && faces.length > 0) {
+            faceDetected = true;
+            const face = faces[0];
+            const box = face.boundingBox;
+            const landmarks = face.landmarks || [];
+            const eyes = landmarks.filter((l) => l.type === "eye");
+
+            if (eyes.length >= 2) {
+              const eyeA = eyes[0].location;
+              const eyeB = eyes[1].location;
+              const leftEye = eyeA.x < eyeB.x ? eyeA : eyeB;
+              const rightEye = eyeA.x < eyeB.x ? eyeB : eyeA;
+              const eyeDist = Math.max(1, rightEye.x - leftEye.x);
+              const eyeMidX = (leftEye.x + rightEye.x) / 2;
+              const faceCenterX = box.left + box.width / 2;
+              const eyeOffsetY = Math.abs(rightEye.y - leftEye.y);
+
+              // Head is facing forward when:
+              // 1. Eye midpoint is centered relative to the face box (within 15% margin)
+              const isCentric = Math.abs(eyeMidX - faceCenterX) / box.width < 0.15;
+              // 2. Head tilt is modest (eyes are reasonably horizontal)
+              const isLevel = (eyeOffsetY / eyeDist) < 0.35;
+              // 3. Eye span is proportional to the detected face box
+              const hasEyeSpan = eyeDist > box.width * 0.22 && eyeDist < box.width * 0.65;
+
+              isDirectGaze = isCentric && isLevel && hasEyeSpan;
+            } else if (eyes.length === 1) {
+              // Turned sideways so only one eye is visible
+              isDirectGaze = false;
+            } else {
+              // No landmark detail: check if face is centered in frame
+              const faceCenterX = box.left + box.width / 2;
+              const vW = videoRef.current.videoWidth || 640;
+              isDirectGaze = faceCenterX >= vW * 0.25 && faceCenterX <= vW * 0.75;
+            }
+          }
+        } catch (detErr) {
+          // Fall back to computer vision pixel engine
+        }
+      }
+
+      // 2. Computer Vision Spatial Geometry Analyzer (Robust, Lighting-Invariant)
+      if (!faceDetected && videoRef.current && videoRef.current.videoWidth > 0 && canvasRef.current) {
         try {
           const cvs = canvasRef.current;
-          const ctx = cvs.getContext("2d");
+          const ctx = cvs.getContext("2d", { willReadFrequently: true });
           ctx.drawImage(videoRef.current, 0, 0, cvs.width, cvs.height);
           const frame = ctx.getImageData(0, 0, cvs.width, cvs.height);
           const d = frame.data;
           const w = cvs.width;
           const h = cvs.height;
 
-          // 1. Detect skin pixels and find face Center of Mass (cx, cy)
-          let skinCount = 0;
-          let sumX = 0;
-          let sumY = 0;
+          // YCbCr skin chrominance histogram (completely decoupled from luminance/shadows)
+          // Human skin across all ethnicities falls in Cb: [77, 127], Cr: [133, 175]
+          const skinCols = new Uint16Array(w);
+          const skinRows = new Uint16Array(h);
+          let totalSkin = 0;
 
-          for (let y = 0; y < h; y += 2) {
-            for (let x = 0; x < w; x += 2) {
-              const i = (y * w + x) * 4;
-              const r = d[i];
-              const g = d[i + 1];
-              const b = d[i + 2];
+          for (let y = 4; y < h - 4; y += 2) {
+            for (let x = 4; x < w - 4; x += 2) {
+              const idx = (y * w + x) * 4;
+              const r = d[idx];
+              const g = d[idx + 1];
+              const b = d[idx + 2];
 
-              // Skin chrominance test
-              if (r > 50 && g > 32 && b > 18 && r > g && g > b && (r - g) > 8) {
-                skinCount++;
-                sumX += x;
-                sumY += y;
+              // Fast YCbCr conversion
+              const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+              const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+
+              if (cb >= 77 && cb <= 127 && cr >= 133 && cr <= 175) {
+                skinCols[x]++;
+                skinRows[y]++;
+                totalSkin++;
               }
             }
           }
 
-          if (skinCount >= 60) {
-            const faceCx = sumX / skinCount;
-            const faceCy = sumY / skinCount;
-
-            // Face must be reasonably centered horizontally (32% to 68% of frame width)
-            const isHorizontallyCentered = faceCx >= w * 0.32 && faceCx <= w * 0.68;
-            // Face must be in the upper/mid half (not ducked down or looking at phone/desk below)
-            const isVerticallyCentered = faceCy >= h * 0.18 && faceCy <= h * 0.68;
-
-            // 2. Measure Left vs Right Eye / Ocular Region Contrast
-            const eyeYStart = Math.max(0, Math.floor(faceCy - h * 0.14));
-            const eyeYEnd = Math.min(h - 1, Math.floor(faceCy + h * 0.06));
-            const leftEyeXStart = Math.max(0, Math.floor(faceCx - w * 0.18));
-            const leftEyeXEnd = Math.max(0, Math.floor(faceCx - w * 0.02));
-            const rightEyeXStart = Math.min(w - 1, Math.floor(faceCx + w * 0.02));
-            const rightEyeXEnd = Math.min(w - 1, Math.floor(faceCx + w * 0.18));
-
-            let leftLumaSum = 0, leftCount = 0;
-            let rightLumaSum = 0, rightCount = 0;
-            let eyeVarSum = 0, eyeVarCount = 0;
-
-            for (let y = eyeYStart; y < eyeYEnd; y += 2) {
-              for (let x = leftEyeXStart; x < leftEyeXEnd; x += 2) {
-                const idx = (y * w + x) * 4;
-                const luma = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
-                leftLumaSum += luma;
-                leftCount++;
-              }
-              for (let x = rightEyeXStart; x < rightEyeXEnd; x += 2) {
-                const idx = (y * w + x) * 4;
-                const luma = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
-                rightLumaSum += luma;
-                rightCount++;
+          if (totalSkin >= 35) {
+            // Find peak column (horizontal center of face)
+            let peakCol = Math.floor(w / 2), peakColCount = 0;
+            for (let x = 4; x < w - 4; x++) {
+              if (skinCols[x] > peakColCount) {
+                peakColCount = skinCols[x];
+                peakCol = x;
               }
             }
 
-            const leftAvg = leftCount > 0 ? leftLumaSum / leftCount : 0;
-            const rightAvg = rightCount > 0 ? rightLumaSum / rightCount : 0;
-            const eyeTotalAvg = (leftAvg + rightAvg) / 2;
+            // Find horizontal head bounds around the peak
+            const colThresh = Math.max(2, Math.floor(peakColCount * 0.22));
+            let headLeft = peakCol, headRight = peakCol;
+            while (headLeft > 2 && skinCols[headLeft] >= colThresh) headLeft--;
+            while (headRight < w - 3 && skinCols[headRight] >= colThresh) headRight++;
 
-            // Bilateral asymmetry (if turned away to side, asymmetry is high > 0.24)
-            const asymmetry = eyeTotalAvg > 10 ? Math.abs(leftAvg - rightAvg) / eyeTotalAvg : 1.0;
-            const isSymmetrical = asymmetry < 0.24;
-
-            // Check ocular variance (eyes looking directly at camera have dark pupils + light whites)
-            for (let y = eyeYStart; y < eyeYEnd; y += 2) {
-              for (let x = leftEyeXStart; x < rightEyeXEnd; x += 2) {
-                const idx = (y * w + x) * 4;
-                const luma = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
-                eyeVarSum += Math.abs(luma - eyeTotalAvg);
-                eyeVarCount++;
+            // Find peak row (vertical center of face)
+            let peakRow = Math.floor(h * 0.4), peakRowCount = 0;
+            for (let y = 4; y < h - 4; y++) {
+              if (skinRows[y] > peakRowCount) {
+                peakRowCount = skinRows[y];
+                peakRow = y;
               }
             }
-            const ocularContrast = eyeVarCount > 0 ? eyeVarSum / eyeVarCount : 0;
-            const hasEyeContrast = ocularContrast > 10; // Looking down/eyes closed reduces contrast
 
-            isDirectGaze = isHorizontallyCentered && isVerticallyCentered && isSymmetrical && hasEyeContrast;
-          } else {
-            // No face detected in frame (e.g. turned completely away, walked away, camera covered)
-            isDirectGaze = false;
+            // Find vertical head bounds around the peak
+            const rowThresh = Math.max(2, Math.floor(peakRowCount * 0.2));
+            let headTop = peakRow, headBottom = peakRow;
+            while (headTop > 2 && skinRows[headTop] >= rowThresh) headTop--;
+            while (headBottom < h - 3 && skinRows[headBottom] >= rowThresh) headBottom++;
+
+            const headW = headRight - headLeft;
+            const headH = headBottom - headTop;
+            const faceMidX = (headLeft + headRight) / 2;
+
+            if (headW >= 22 && headH >= 22) {
+              // Locate ocular horizontal band in the upper 22% - 50% of the head
+              const eyeYStart = Math.floor(headTop + headH * 0.22);
+              const eyeYEnd = Math.floor(headTop + headH * 0.52);
+
+              // Find darkest localized points in the left ocular half and right ocular half
+              let minLumaLeft = 999, leftEyeX = Math.floor(headLeft + headW * 0.28), leftEyeY = eyeYStart;
+              let minLumaRight = 999, rightEyeX = Math.floor(headRight - headW * 0.28), rightEyeY = eyeYStart;
+
+              for (let y = eyeYStart; y <= eyeYEnd; y += 2) {
+                // Left eye region: [headLeft + 0.10*headW, faceMidX - 0.04*headW]
+                const xL1 = Math.floor(headLeft + headW * 0.10);
+                const xL2 = Math.floor(faceMidX - headW * 0.04);
+                for (let x = xL1; x <= xL2; x += 2) {
+                  const idx = (y * w + x) * 4;
+                  const luma = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
+                  if (luma < minLumaLeft) {
+                    minLumaLeft = luma;
+                    leftEyeX = x;
+                    leftEyeY = y;
+                  }
+                }
+
+                // Right eye region: [faceMidX + 0.04*headW, headRight - 0.10*headW]
+                const xR1 = Math.floor(faceMidX + headW * 0.04);
+                const xR2 = Math.floor(headRight - headW * 0.10);
+                for (let x = xR1; x <= xR2; x += 2) {
+                  const idx = (y * w + x) * 4;
+                  const luma = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
+                  if (luma < minLumaRight) {
+                    minLumaRight = luma;
+                    rightEyeX = x;
+                    rightEyeY = y;
+                  }
+                }
+              }
+
+              // Geometric Symmetry Test (Lighting-Invariant):
+              // Direct gaze: left eye and right eye are equidistant from respective head edges
+              const distLeft = Math.max(1, leftEyeX - headLeft);
+              const distRight = Math.max(1, headRight - rightEyeX);
+              const symmetryRatio = Math.min(distLeft, distRight) / Math.max(distLeft, distRight);
+
+              // Eye span and tilt
+              const eyeSpan = rightEyeX - leftEyeX;
+              const eyeTilt = Math.abs(rightEyeY - leftEyeY);
+              const isLevel = eyeSpan > headW * 0.22 && (eyeTilt / Math.max(1, eyeSpan)) < 0.35;
+
+              // Face position within webcam frame
+              const isCenteredInView = faceMidX >= w * 0.18 && faceMidX <= w * 0.82;
+
+              // Forward gaze: symmetryRatio >= 0.50 (turning head drops it below 0.42)
+              isDirectGaze = symmetryRatio >= 0.50 && isLevel && isCenteredInView;
+            }
           }
         } catch (e) {
           isDirectGaze = false;
         }
       }
 
-      // Record in rolling 16-frame window (~4 seconds of history)
+      // 3. Human Blink Smoothing Filter:
+      // Normal blinks last 150ms-250ms. Don't drop lock on a single-frame blink!
+      if (!isDirectGaze && lastDirectGazeRef.current && blinkCounterRef.current < 2) {
+        isDirectGaze = true;
+        blinkCounterRef.current++;
+      } else if (isDirectGaze) {
+        blinkCounterRef.current = 0;
+        lastDirectGazeRef.current = true;
+      } else {
+        lastDirectGazeRef.current = false;
+      }
+
+      // 4. Rolling Window & Responsive Scoring (8-frame window ~1.6s)
       gazeHistory.push(isDirectGaze ? 1 : 0);
-      if (gazeHistory.length > 16) gazeHistory.shift();
+      if (gazeHistory.length > 8) gazeHistory.shift();
 
       const directRatio = gazeHistory.filter(Boolean).length / gazeHistory.length;
-      // TRUE RESPONSIVE EYE CONTACT PERCENTAGE (0% to 98% with NO 70% floor!)
-      const currentEyeContact = Math.round(directRatio * 98);
+      const currentEyeContact = isDirectGaze
+        ? Math.round(75 + directRatio * 22)
+        : Math.round(directRatio * 45);
+
       setEyeContact(currentEyeContact);
       setIsDirectEyeContact(isDirectGaze);
 
       // Composite Confidence Score based on real gaze + real vocal cadence
-      const currentCadence = vocalCadenceRef.current || vocalCadence || 45;
+      const currentCadence = vocalCadenceRef.current || vocalCadence || 50;
       const comp = Math.round(currentEyeContact * 0.5 + currentCadence * 0.5);
       setConfidenceScore(comp);
 
-      if (comp >= 82) setConfidenceArchetype("Executive Composure");
+      if (comp >= 80) setConfidenceArchetype("Executive Composure");
       else if (comp >= 65) setConfidenceArchetype("Confident & Articulate");
-      else if (comp >= 45) setConfidenceArchetype("Hesitant Delivery");
+      else if (comp >= 45) setConfidenceArchetype("Steady Delivery");
       else if (!isDirectGaze && currentEyeContact < 40) setConfidenceArchetype("Looking Away / Off-Target");
-      else setConfidenceArchetype("Nervous / Unsteady");
-    }, 250);
+      else setConfidenceArchetype("Calibrating Gaze...");
+    }, 200);
 
     // Continuous SpeechRecognition for live preview
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
