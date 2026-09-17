@@ -1754,7 +1754,13 @@ def transcribe_audio_with_gemini(audio_bytes: bytes, mime_type: str = "audio/web
             "- Do NOT add any introductory text, markdown quotes, or conversational notes.\n"
             "- Only if there is zero human speech (pure silence, static, or hum), output strictly: [NO_SPEECH]"
         )
-        for model_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        for model_name in [
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-2.5-flash",
+            "gemini-flash-latest"
+        ]:
             try:
                 res = client.models.generate_content(
                     model=model_name,
