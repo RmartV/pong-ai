@@ -577,20 +577,26 @@ export default function App() {
   };
 
   const handleSyncJira = async () => {
-    if (!result?.id) return;
+    if (!result) return;
     setSyncingJira(true);
+    const projId = result.id || `proj_${Date.now()}`;
     try {
-      const res = await fetch(`${API}/api/projects/${result.id}/sync-jira`, { method: "POST" });
-      if (!res.ok) throw new Error();
+      const res = await fetch(`${API}/api/projects/${projId}/sync-jira`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(result)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setJiraData(data);
       setJiraModalOpen(true);
-    } catch {
+    } catch (err) {
+      console.warn("Backend sync failed, falling back to local simulation:", err);
       const fallbackJira = {
         jira_project: {
           key: "PONG",
-          name: result.project_name,
-          board_name: `${result.project_name} Agile Board`
+          name: result.project_name || "Enterprise Project",
+          board_name: `${result.project_name || "Enterprise"} Agile Board`
         },
         sprint: {
           name: "Sprint 1 - Foundation & Core Architecture",

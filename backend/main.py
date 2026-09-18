@@ -1428,21 +1428,30 @@ def delete_candidate_endpoint(candidate_id: str):
 # ── Workato -> Jira Provisioning Endpoint ─────────────────────────────────────
 
 @app.post("/api/projects/{project_id}/sync-jira")
-def sync_project_to_jira(project_id: str):
+def sync_project_to_jira(project_id: str, payload_data: Optional[dict] = Body(None)):
     """
     Executes Step 4 of the End-to-End Workflow:
     Takes the matched project and candidates, builds the Jira Project Board,
     attaches candidate player card stats to their issues, and auto-populates Sprint 1.
     """
-    # Fetch project
+    # Fetch project from DB, memory, or request payload fallback
     project = None
     if has_mongo and projects_col is not None:
         try:
             project = projects_col.find_one({"_id": ObjectId(project_id)})
         except Exception:
             pass
+        if not project:
+            try:
+                project = projects_col.find_one({"id": project_id})
+            except Exception:
+                pass
     if not project and project_id in memory_projects:
         project = memory_projects[project_id]
+
+    if not project and payload_data and isinstance(payload_data, dict) and payload_data.get("roles"):
+        project = payload_data.copy()
+        memory_projects[project_id] = project
 
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1529,11 +1538,25 @@ def sync_project_to_jira(project_id: str):
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    # Optionally trigger external Workato Webhook if URL is configured
+    # Trigger external Workato Webhook with full top-level fields AND nested payload
     workato_url = get_env("WORKATO_JIRA_WEBHOOK_URL") or get_env("WORKATO_SCOPING_WEBHOOK_URL")
     if workato_url and requests is not None:
         try:
-            res = requests.post(workato_url, json={"event": "pongai_project_matched", "payload": jira_response}, timeout=8)
+            workato_payload = {
+                "event": "pongai_project_matched",
+                "project_id": project_id,
+                "project_name": project_name,
+                "tech_signals": project.get("tech_signals", []),
+                "team_size": project.get("team_size", len(roles)),
+                "roles": roles,
+                "unassigned_backlog": created_issues,
+                "issues": created_issues,
+                "total_story_points": total_story_points,
+                "jira_project": jira_response["jira_project"],
+                "sprint": jira_response["sprint"],
+                "payload": jira_response
+            }
+            res = requests.post(workato_url, json=workato_payload, timeout=10)
             print(f"[INFO] Forwarded to Workato Webhook: status {res.status_code}")
         except Exception as e:
             print(f"[WARN] Could not forward to Workato Webhook: {e}")
