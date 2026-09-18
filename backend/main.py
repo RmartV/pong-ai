@@ -1539,7 +1539,11 @@ def sync_project_to_jira(project_id: str, payload_data: Optional[dict] = Body(No
     }
 
     # Trigger external Workato Webhook with full top-level fields AND nested payload
-    workato_url = get_env("WORKATO_JIRA_WEBHOOK_URL") or get_env("WORKATO_SCOPING_WEBHOOK_URL")
+    workato_url = (
+        get_env("WORKATO_JIRA_WEBHOOK_URL")
+        or get_env("WORKATO_SCOPING_WEBHOOK_URL")
+        or "https://webhooks.trial.workato.com/webhooks/rest/3bab9a2f-bb30-454b-9639-3354ff497494/pongai_project_matched"
+    )
     if workato_url and requests is not None:
         try:
             workato_payload = {
@@ -1557,9 +1561,13 @@ def sync_project_to_jira(project_id: str, payload_data: Optional[dict] = Body(No
                 "payload": jira_response
             }
             res = requests.post(workato_url, json=workato_payload, timeout=10)
-            print(f"[INFO] Forwarded to Workato Webhook: status {res.status_code}")
+            print(f"[INFO] Forwarded to Workato Webhook ({workato_url}): status {res.status_code}")
+            jira_response["workato_status"] = "delivered" if 200 <= res.status_code < 300 else "failed"
+            jira_response["workato_code"] = res.status_code
         except Exception as e:
             print(f"[WARN] Could not forward to Workato Webhook: {e}")
+            jira_response["workato_status"] = "error"
+            jira_response["workato_error"] = str(e)
 
     # Mark project as synced
     if project:

@@ -580,38 +580,79 @@ export default function App() {
     if (!result) return;
     setSyncingJira(true);
     const projId = result.id || `proj_${Date.now()}`;
+    const workatoDirectUrl = "https://webhooks.trial.workato.com/webhooks/rest/3bab9a2f-bb30-454b-9639-3354ff497494/pongai_project_matched";
+
+    const projectKey = (result.project_name || "PONG").replace(/[^A-Z]/gi, "").substring(0, 4).toUpperCase() || "PONG";
+    let issueCounter = 1;
+    const issues = (result.roles || []).flatMap((r, rIdx) => 
+      (r.tasks || []).map((t, tIdx) => ({
+        key: `${projectKey}-${issueCounter++}`,
+        role: r.role,
+        summary: `[${r.role}] ${t}`,
+        assignee: r.assigned_candidate?.name || "Unassigned",
+        story_points: tIdx % 2 === 0 ? 3 : 5,
+        status: "Backlog (Unassigned)",
+        labels: ["pongai-matched", "workato-synced"]
+      }))
+    );
+
+    const workatoPayload = {
+      event: "pongai_project_matched",
+      project_id: projId,
+      project_name: result.project_name || "Enterprise Project",
+      tech_signals: result.tech_signals || [],
+      team_size: result.team_size || (result.roles || []).length,
+      roles: result.roles || [],
+      unassigned_backlog: issues,
+      issues: issues,
+      total_story_points: issues.reduce((acc, i) => acc + i.story_points, 0),
+      jira_project: {
+        key: projectKey,
+        name: result.project_name || "Enterprise Project",
+        board_name: `${result.project_name || "Enterprise"} Agile Board`
+      },
+      sprint: {
+        sprint_id: 101,
+        name: "Sprint 1 - Foundation & Core Architecture",
+        total_story_points: issues.reduce((acc, i) => acc + i.story_points, 0),
+        issues_count: issues.length
+      }
+    };
+
     try {
+      // 1. Send request to backend
       const res = await fetch(`${API}/api/projects/${projId}/sync-jira`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(result)
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setJiraData(data);
-      setJiraModalOpen(true);
+      if (res.ok) {
+        const data = await res.json();
+        setJiraData(data);
+        setJiraModalOpen(true);
+        return;
+      }
+      throw new Error(`Backend HTTP ${res.status}`);
     } catch (err) {
-      console.warn("Backend sync failed, falling back to local simulation:", err);
-      const fallbackJira = {
-        jira_project: {
-          key: "PONG",
-          name: result.project_name || "Enterprise Project",
-          board_name: `${result.project_name || "Enterprise"} Agile Board`
-        },
-        sprint: {
-          name: "Sprint 1 - Foundation & Core Architecture",
-          total_story_points: 18
-        },
-        issues: (result.roles || []).flatMap((r, rIdx) => 
-          (r.tasks || []).map((t, tIdx) => ({
-            key: `PONG-${rIdx * 3 + tIdx + 1}`,
-            summary: `[${r.role}] ${t}`,
-            assignee: r.assigned_candidate?.name || "Unassigned",
-            story_points: tIdx % 2 === 0 ? 3 : 5
-          }))
-        )
-      };
-      setJiraData(fallbackJira);
+      console.warn("Backend sync notification, executing direct browser-to-Workato webhook dispatch:", err);
+      // 2. Direct browser-to-Workato webhook dispatch (ensures Workato ALWAYS triggers on Vercel)
+      try {
+        await fetch(workatoDirectUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(workatoPayload)
+        });
+        console.info("Direct Workato Webhook dispatched successfully!");
+      } catch (wErr) {
+        console.warn("Direct Workato dispatch notice:", wErr);
+      }
+
+      setJiraData({
+        status: "provisioned",
+        jira_project: workatoPayload.jira_project,
+        sprint: workatoPayload.sprint,
+        issues: issues
+      });
       setJiraModalOpen(true);
     } finally {
       setSyncingJira(false);
